@@ -1,42 +1,67 @@
 package de.eon.kidgen.service;
 
+import de.eon.kidgen.entity.GeneratedKid;
+import de.eon.kidgen.entity.KidCounter;
 import de.eon.kidgen.model.KidRequest;
+import de.eon.kidgen.repository.GeneratedKidRepository;
+import de.eon.kidgen.repository.KidCounterRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.text.Normalizer;
-import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.Map;
+import java.time.Instant;
 import java.util.logging.Logger;
 
 /**
- * Creates KIDs using one in-memory counter for every uppercase ASCII letter.
+ * Creates KIDs and stores both their counter and audit record in PostgreSQL.
  */
-public class KidGenerator {
+@Service
+public class KidService {
 
-    private static final Logger LOGGER = Logger.getLogger(KidGenerator.class.getName());
+    private static final Logger LOGGER = Logger.getLogger(KidService.class.getName());
 
-    private final Map<Character, Integer> counters;
+    private final KidCounterRepository kidCounterRepository;
+    private final GeneratedKidRepository generatedKidRepository;
 
-    public KidGenerator() {
-        counters = new HashMap<>();
-
-        // Each letter starts at zero so that its first generated KID ends in 0001.
-        for (char letter = 'A'; letter <= 'Z'; letter++) {
-            counters.put(letter, 0);
-        }
+    public KidService(KidCounterRepository kidCounterRepository,
+                      GeneratedKidRepository generatedKidRepository) {
+        this.kidCounterRepository = kidCounterRepository;
+        this.generatedKidRepository = generatedKidRepository;
     }
 
+    /**
+     * A transaction makes the counter update and audit record one all-or-nothing operation.
+     */
+    @Transactional
     public String generateKid(KidRequest request) {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
         }
 
         char letter = getKidLetter(request.getGivenName(), request.getSn());
-        int nextCounter = counters.get(letter) + 1;
-        counters.put(letter, nextCounter);
+        KidCounter kidCounter = kidCounterRepository.findByLetterForUpdate(String.valueOf(letter));
 
+        if (kidCounter == null) {
+            throw new IllegalStateException("No counter exists for letter " + letter);
+        }
+
+        long nextCounter = kidCounter.increaseCounter();
         String kid = letter + formatCounter(nextCounter);
-        logGeneratedKid(kid, request);
+        Instant generationTime = Instant.now();
+
+        kidCounterRepository.save(kidCounter);
+        generatedKidRepository.save(new GeneratedKid(
+                kid,
+                request.getSn(),
+                request.getGivenName(),
+                request.getEonBUshort(),
+                request.getEonUserType(),
+                request.getEonUserPurpose(),
+                request.getDescription(),
+                generationTime
+        ));
+
+        logGeneratedKid(kid, request, generationTime);
         return kid;
     }
 
@@ -80,11 +105,11 @@ public class KidGenerator {
         return null;
     }
 
-    public String formatCounter(int counter) {
+    public String formatCounter(long counter) {
         return String.format("%04d", counter);
     }
 
-    private void logGeneratedKid(String kid, KidRequest request) {
+    private void logGeneratedKid(String kid, KidRequest request, Instant generationTime) {
         String message = "Generated KID: " + kid
                 + ", givenName: " + request.getGivenName()
                 + ", sn: " + request.getSn()
@@ -92,7 +117,7 @@ public class KidGenerator {
                 + ", eonUserType: " + request.getEonUserType()
                 + ", eonUserPurpose: " + request.getEonUserPurpose()
                 + ", description: " + request.getDescription()
-                + ", generation time: " + LocalDateTime.now();
+                + ", generation time: " + generationTime;
         LOGGER.info(message);
     }
 }
