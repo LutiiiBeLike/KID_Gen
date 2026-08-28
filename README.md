@@ -1,35 +1,29 @@
 # KID Generator
 
-This is a beginner-friendly Java learning project for generating **KIDs**
-(person identifiers). The current version implements only the basic KID
-generation logic. It is not a Spring Boot application yet.
+A beginner-friendly Spring Boot project that generates person identifiers (KIDs)
+and stores their counters and audit history in PostgreSQL. CID generation and
+OAuth are not implemented yet.
 
-## Current status
+## KID rules
 
-Implemented:
+A KID has the format `XYYYY`, such as `M0001`.
 
-- KID generation in the format `XYYYY`, for example `M0001`
-- One in-memory counter for each letter from `A` to `Z`
-- Unicode accent conversion, for example `Ä -> A` and `Ö -> O`
-- Fallback from `givenName` to `sn`, then to `X`
-- Simple application logging when a KID is generated
+- `X` is an uppercase ASCII letter from `A` to `Z`.
+- `YYYY` is the decimal counter for that letter, with at least four digits.
+- Each prefix has its own PostgreSQL counter: `M0001`, `M0002`, then `A0001`.
 
-Not implemented yet:
-
-- JUnit tests
-- CID generation
-- Spring Boot and a REST API
-- Database persistence
-- Concurrency protection
-- OAuth 2.0 security
+The prefix comes from the first character of `givenName`; if that cannot become
+an ASCII letter, `sn` is tried; otherwise `X` is used. Java `Normalizer`
+separates an accented letter from its accent mark, allowing `Ä`, `Ö`, `Ü`, `É`,
+`Ç`, and `Å` to become `A`, `O`, `U`, `E`, `C`, and `A`.
 
 ## Prerequisites
 
 - Java 21
 - Maven 3.9 or newer
+- Docker Desktop running locally
 
-On the current macOS development environment, Java 21 installed with Homebrew
-can be selected for the current terminal session with:
+On the current macOS development environment:
 
 ```bash
 export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
@@ -37,109 +31,108 @@ export PATH="$JAVA_HOME/bin:$PATH"
 java -version
 ```
 
-The last command should show Java 21.
+## Start PostgreSQL
 
-## Build and test
-
-From the repository root, run:
+`.env` is ignored by Git, so a password is never committed. Create it from the
+example, then choose a local development password in `DATABASE_PASSWORD`:
 
 ```bash
-mvn clean package
+cp .env.example .env
+docker compose up -d
 ```
 
-This compiles the source code and creates a JAR file in `target/`.
+Docker Compose starts PostgreSQL 17 on port `5432`. Its named volume keeps data
+when the container stops.
 
-You can also run the test phase directly:
+## Start the API
+
+Load the local database settings, then start Spring Boot:
+
+```bash
+set -a
+source .env
+set +a
+mvn spring-boot:run
+```
+
+Flyway runs the SQL migrations from `src/main/resources/db/migration` during
+startup. It creates the counter and audit tables. Hibernate validates that the
+Java entities match that schema but does not create tables itself.
+
+## Generate a KID
+
+With the application running, use a second terminal:
+
+```bash
+curl -i -X POST http://localhost:8080/api/kids \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sn": "Müller",
+    "givenName": "Max",
+    "eonBUshort": "EON",
+    "eonUserType": "Employee",
+    "eonUserPurpose": "Standard",
+    "description": "Test user"
+  }'
+```
+
+The first request returns `201 Created`:
+
+```json
+{
+  "kid": "M0001"
+}
+```
+
+Missing, empty, or whitespace-only required fields return `400 Bad Request`:
+
+```json
+{
+  "error": "givenName must not be empty"
+}
+```
+
+Inspect the stored counter and audit rows after loading `.env`:
+
+```bash
+docker compose exec db psql -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" \
+  -c "SELECT letter, counter FROM kid_counter WHERE letter = 'M';"
+
+docker compose exec db psql -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" \
+  -c "SELECT kid, given_name, sn, created_at FROM generated_kid;"
+```
+
+## Important Spring concepts
+
+- `@RestController` handles HTTP requests and returns JSON.
+- `@PostMapping` maps a Java method to an HTTP POST request.
+- `@RequestBody` reads request JSON into a Java object.
+- `@Service` marks the KID business logic class.
+- `@Entity` maps a Java class to a database table; `@Id` is its primary key and
+  `@Column` maps a field to a database column.
+- `JpaRepository` provides simple database operations such as save and find.
+- `@Transactional` makes the counter update and audit insert all-or-nothing.
+- Constructor injection makes a class's required dependencies explicit.
+
+PostgreSQL stores the data. JPA maps Java entities to PostgreSQL rows, and
+Spring Data creates repository implementations from the repository interfaces.
+
+`PESSIMISTIC_WRITE` locks the selected counter row during generation. A second
+request for the same letter waits for the first request to commit, preventing
+both requests from creating the same KID. The unique `generated_kid.kid`
+constraint is an additional database safety check.
+
+## Build and production status
+
+Run these before committing:
 
 ```bash
 mvn test
+mvn package
 ```
 
-There are no JUnit tests in Step 1 yet, so Maven completes successfully with
-zero tests. Step 2 will add the KID generator tests.
-
-## Try the generator
-
-This project is currently a Java library, not a command-line or web
-application. A simple way to try it is Java's `jshell` after building it:
-
-```bash
-jshell --class-path target/classes
-```
-
-Then enter the following lines:
-
-```java
-import de.eon.kidgen.model.KidRequest;
-import de.eon.kidgen.service.KidGenerator;
-
-KidGenerator generator = new KidGenerator();
-
-KidRequest request = new KidRequest(
-        "Mustermann",
-        "Max",
-        "EON",
-        "Employee",
-        "Standard",
-        "Test user"
-);
-
-String kid = generator.generateKid(request);
-System.out.println(kid);
-```
-
-The output is:
-
-```text
-M0001
-```
-
-Type `/exit` to leave `jshell`.
-
-## How KID generation works
-
-`KidGenerator` uses the first character of `givenName` as the KID letter. If
-that character cannot become an ASCII letter from `A` to `Z`, it tries the
-first character of `sn`. If neither works, it uses `X`.
-
-Before checking a character, Java's `Normalizer` separates accents from a
-letter. For example, `Ö` becomes `O` plus an accent mark. The generator removes
-the accent mark and keeps `O`. This allows names such as `Änne`, `Ömer`, and
-`Émile` to produce `A`, `O`, and `E`.
-
-The generator keeps a `Map<Character, Integer>` with a separate counter for
-each letter. Therefore, two names beginning with `M` produce `M0001` and
-`M0002`, while the first name beginning with `A` produces `A0001`.
-
-The number is formatted with at least four digits:
-
-```text
-1     -> 0001
-42    -> 0042
-1000  -> 1000
-10000 -> 10000
-```
-
-When a KID is generated, Java's normal application logger writes the KID,
-request values, and generation time.
-
-## Production readiness
-
-**Do not deploy the current version to production.** Its counters exist only
-in memory. Restarting the application resets every counter to zero, and two
-requests at the same time could receive the same KID.
-
-Before production use, the project needs all of the following:
-
-1. JUnit tests for the KID rules and edge cases.
-2. A relational database that stores counters and generated identifiers.
-3. Safe concurrent database updates and unique database constraints, so IDs
-   cannot be duplicated.
-4. A Spring Boot REST API for controlled access to the generator.
-5. Persistent audit logging for generation requests and results.
-6. OAuth 2.0 protection for the REST API.
-7. Deployment-specific configuration for the database and OAuth provider.
-
-Never commit database passwords, OAuth client secrets, access tokens, or other
-credentials to this repository. Production secrets must be supplied through a
-secure deployment environment or secret manager.
+JUnit is configured but KID test classes are the next planned step, so the
+current test phase completes with zero tests. Before production use, add those
+tests, CID support, operational monitoring, and OAuth 2.0. Supply production
+database and OAuth secrets through a deployment environment or secret manager;
+never commit them to Git.

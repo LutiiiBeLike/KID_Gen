@@ -2,7 +2,7 @@ package de.eon.kidgen.service;
 
 import de.eon.kidgen.entity.GeneratedKid;
 import de.eon.kidgen.entity.KidCounter;
-import de.eon.kidgen.model.KidRequest;
+import de.eon.kidgen.dto.KidRequest;
 import de.eon.kidgen.repository.GeneratedKidRepository;
 import de.eon.kidgen.repository.KidCounterRepository;
 import org.springframework.stereotype.Service;
