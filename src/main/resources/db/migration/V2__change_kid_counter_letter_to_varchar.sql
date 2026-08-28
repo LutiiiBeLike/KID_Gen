@@ -1,0 +1,2 @@
+ALTER TABLE kid_counter
+    ALTER COLUMN letter TYPE VARCHAR(1);
