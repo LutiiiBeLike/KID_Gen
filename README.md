@@ -1,52 +1,56 @@
-# KID Generator
+# CID Generator
 
-A beginner-friendly Spring Boot project that generates person identifiers (KIDs)
-and stores their counters and audit history in PostgreSQL. CID generation and
-OAuth are not implemented yet.
+A beginner-friendly Spring Boot application that creates unique Contract IDs
+(CIDs) and records each generated CID with its contract information in
+PostgreSQL.
 
-## KID rules
+## CID format
 
-A KID has the format `XYYYY`, such as `M0001`.
+A CID is always six characters: `C` + range letter + four base-34 characters.
+The configured initial range letter is `D`, so the first CIDs are `CD0000`,
+`CD0001`, `CD0009`, `CD000A`, and `CD000B`.
 
-- `X` is an uppercase ASCII letter from `A` to `Z`.
-- `YYYY` is the decimal counter for that letter, with at least four digits.
-- Each prefix has its own PostgreSQL counter: `M0001`, `M0002`, then `A0001`.
+The first `C` is fixed. The second character is the current CID range. The
+last four characters are a counter written with this base-34 alphabet:
 
-The prefix comes from the first character of `givenName`; if that cannot become
-an ASCII letter, `sn` is tried; otherwise `X` is used. Java `Normalizer`
-separates an accented letter from its accent mark, allowing `Ä`, `Ö`, `Ü`, `É`,
-`Ç`, and `Å` to become `A`, `O`, `U`, `E`, `C`, and `A`.
-
-## Prerequisites
-
-- Java 21
-- Maven 3.9 or newer
-- Docker Desktop running locally
-
-On the current macOS development environment:
-
-```bash
-export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
-export PATH="$JAVA_HOME/bin:$PATH"
-java -version
+```text
+0123456789ABCDEFGHJKLMNPQRSTUVWXYZ
 ```
 
-## Start PostgreSQL
+`I` and `O` are intentionally excluded so that an ID is less likely to be
+misread as a number. Decimal `0` becomes `0000`, `10` becomes `000A`, `33`
+becomes `000Z`, and `34` becomes `0010`. Four base-34 characters allow values
+from `0` through `1,336,335` (`34^4 - 1`). The next request after that limit
+returns `409 Conflict` with `CID range D is exhausted`.
 
-`.env` is ignored by Git, so a password is never committed. Create it from the
-example, then choose a local development password in `DATABASE_PASSWORD`:
+The database counter stores the ordinary decimal value, not the base-34 text.
+It starts at `0`, therefore the explicitly chosen first CID is `CD0000`.
+
+## Configure the range letter
+
+`src/main/resources/application.properties` contains:
+
+```properties
+cid.range-letter=D
+```
+
+Spring reads this property and passes it into `CidService` using `@Value` in
+its constructor. To begin another range, add a corresponding `cid_counter`
+row in PostgreSQL and change this property to that one uppercase letter.
+
+## PostgreSQL setup
+
+Prerequisites: Java 21, Maven 3.9+, and Docker Desktop.
+
+Create a local `.env` from the ignored template, choose a local password, and
+start PostgreSQL:
 
 ```bash
 cp .env.example .env
 docker compose up -d
 ```
 
-Docker Compose starts PostgreSQL 17 on port `5432`. Its named volume keeps data
-when the container stops.
-
-## Start the API
-
-Load the local database settings, then start Spring Boot:
+Start the API with the environment values loaded:
 
 ```bash
 set -a
@@ -55,84 +59,68 @@ set +a
 mvn spring-boot:run
 ```
 
-Flyway runs the SQL migrations from `src/main/resources/db/migration` during
-startup. It creates the counter and audit tables. Hibernate validates that the
-Java entities match that schema but does not create tables itself.
+Flyway applies the SQL files in `src/main/resources/db/migration`. V3 removes
+the previous KID-only tables in this development project and creates:
 
-## Generate a KID
+- `cid_counter(range_letter, counter)`, initialized with `D, 0`
+- `generated_cid`, the CID audit history, with a unique `cid` column
 
-With the application running, use a second terminal:
+The counter and audit insert are one transaction. The repository uses a
+`PESSIMISTIC_WRITE` lock on the current range’s row: when two requests arrive
+together, the second waits for the first transaction to finish before it reads
+the counter. This prevents duplicate counter values; the database unique
+constraint is an additional safeguard. Because the counter is in PostgreSQL,
+restarting Spring Boot does not reset it.
+
+## Generate a CID
+
+Send a POST request to `/api/cids`:
 
 ```bash
-curl -i -X POST http://localhost:8080/api/kids \
+curl -i -X POST http://localhost:8080/api/cids \
   -H "Content-Type: application/json" \
   -d '{
-    "sn": "Müller",
-    "givenName": "Max",
-    "eonBUshort": "EON",
-    "eonUserType": "Employee",
-    "eonUserPurpose": "Standard",
-    "description": "Test user"
+    "hrSystem": "SAP",
+    "eonAccountingAreaID": "DE01",
+    "employeeNumber": "12345678"
   }'
 ```
 
-The first request returns `201 Created`:
+The response is `201 Created`:
 
 ```json
 {
-  "kid": "M0001"
+  "cid": "CD0000"
 }
 ```
 
-Missing, empty, or whitespace-only required fields return `400 Bad Request`:
+All three request fields must contain non-whitespace text. Invalid requests
+return `400 Bad Request` with a small JSON error. Unique database conflicts and
+CID range exhaustion return `409 Conflict`. Unexpected failures return `500`
+without exposing a Java stack trace.
 
-```json
-{
-  "error": "givenName must not be empty"
-}
-```
+## Key Spring annotations
 
-Inspect the stored counter and audit rows after loading `.env`:
+- `@RestController` handles HTTP requests and returns JSON; `@PostMapping`
+  maps the generation method to POST, and `@RequestBody` reads JSON.
+- `@Service` marks the class containing CID generation rules.
+- `@Entity` maps a Java class to a table, `@Id` is its primary key, and
+  `@Column` maps fields to columns.
+- `JpaRepository` supplies basic database operations. `@Lock` requests the
+  database lock used when reading the counter.
+- `@Transactional` makes saving the audit row and advancing the counter
+  all-or-nothing.
 
-```bash
-docker compose exec db psql -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" \
-  -c "SELECT letter, counter FROM kid_counter WHERE letter = 'M';"
+## Tests and build
 
-docker compose exec db psql -U "$DATABASE_USERNAME" -d "$DATABASE_NAME" \
-  -c "SELECT kid, given_name, sn, created_at FROM generated_kid;"
-```
-
-## Important Spring concepts
-
-- `@RestController` handles HTTP requests and returns JSON.
-- `@PostMapping` maps a Java method to an HTTP POST request.
-- `@RequestBody` reads request JSON into a Java object.
-- `@Service` marks the KID business logic class.
-- `@Entity` maps a Java class to a database table; `@Id` is its primary key and
-  `@Column` maps a field to a database column.
-- `JpaRepository` provides simple database operations such as save and find.
-- `@Transactional` makes the counter update and audit insert all-or-nothing.
-- Constructor injection makes a class's required dependencies explicit.
-
-PostgreSQL stores the data. JPA maps Java entities to PostgreSQL rows, and
-Spring Data creates repository implementations from the repository interfaces.
-
-`PESSIMISTIC_WRITE` locks the selected counter row during generation. A second
-request for the same letter waits for the first request to commit, preventing
-both requests from creating the same KID. The unique `generated_kid.kid`
-constraint is an additional database safety check.
-
-## Build and production status
-
-Run these before committing:
+Run the automated tests and package the application:
 
 ```bash
 mvn test
 mvn package
 ```
 
-JUnit is configured but KID test classes are the next planned step, so the
-current test phase completes with zero tests. Before production use, add those
-tests, CID support, operational monitoring, and OAuth 2.0. Supply production
-database and OAuth secrets through a deployment environment or secret manager;
-never commit them to Git.
+The tests cover base-34 boundary values, four-character formatting, the lack
+of `I`/`O`, sequence progression, stored audit data, exhaustion, request
+validation, and `POST /api/cids`. The old `/api/kids` endpoint and KID
+generation code no longer exist.
