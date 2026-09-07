@@ -1,12 +1,15 @@
-package de.eon.kidgen.controller;
+package de.eon.cidgen.controller;
 
-import de.eon.kidgen.dto.ApiError;
+import de.eon.cidgen.dto.ApiError;
+import de.eon.cidgen.service.CidRangeExhaustedException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.servlet.NoHandlerFoundException;
 
 /**
  * Converts expected failures into small JSON responses instead of stack traces.
@@ -34,6 +37,24 @@ public class ApiExceptionHandler {
     @ResponseStatus(HttpStatus.CONFLICT)
     public ApiError handleDataConflict(DataIntegrityViolationException exception) {
         return new ApiError("The identifier could not be created uniquely");
+    }
+
+    @ExceptionHandler(CidRangeExhaustedException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ApiError handleRangeExhausted(CidRangeExhaustedException exception) {
+        return new ApiError(exception.getMessage());
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiError handleEndpointNotFound(NoResourceFoundException exception) {
+        return new ApiError("Endpoint not found");
+    }
+
+    @ExceptionHandler(NoHandlerFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiError handleNoHandlerFound(NoHandlerFoundException exception) {
+        return new ApiError("Endpoint not found");
     }
 
     @ExceptionHandler(Exception.class)

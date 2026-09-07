@@ -1,4 +1,4 @@
-package de.eon.kidgen.dto;
+package de.eon.cidgen.dto;
 
 /**
  * Keeps client-facing API errors small and consistent.
